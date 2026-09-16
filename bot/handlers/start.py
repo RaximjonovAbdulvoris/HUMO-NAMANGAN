@@ -10,7 +10,7 @@ MENU_CONTACT = "📞 Bog'lanish uchun"
 MENU_OFFICE = "📍 Ofis manzili"
 OFFICE_PHOTO = Path(__file__).resolve().parents[1] / "templates" / "office.png"
 OFFICE_CAPTION = (
-    "📍 <b>YANGI TAXI ofisi</b>\n\n"
+    "📍 <b>HUMO TAXI ofisi</b>\n\n"
     "Mo‘ljal: Zarkan kordiyalogiya\n"
     "Va Byd namangan yonida\n\n"
     "👇 Manzilni ko‘rish uchun «Xaritada ochish» tugmasini bosing."
@@ -25,9 +25,9 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 WELCOME_TEXT = (
-    "🚖 *YANGI TAXI’ga xush kelibsiz!*\n\n"
+    "🚖 *HUMO TAXI’ga xush kelibsiz!*\n\n"
     "Kerakli bo‘limni tanlang:\n\n"
-    "📝 *Ulanish uchun ariza* — YANGI TAXI haydovchisi bo‘lish uchun ariza yuboring.\n\n"
+    "📝 *Ulanish uchun ariza* — HUMO TAXI haydovchisi bo‘lish uchun ariza yuboring.\n\n"
     "🎨 *Brend Ariza* — Avtomobilni brendlash uchun ariza yuboring.\n\n"
     "📞 *Aloqa* — Biz bilan bog‘lanish uchun aloqa ma’lumotlarini oling.\n\n"
     "📍 *Ofis manzili* — Ofis rasmi, mo‘ljal va xaritani ko‘ring.\n\n"

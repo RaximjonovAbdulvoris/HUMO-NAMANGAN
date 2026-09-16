@@ -52,7 +52,7 @@ _pending_car_progress_tasks: dict[int, asyncio.Task] = {}
 JOIN_GROUP = 13
 REQUIRED_GROUP = "@WB_HUMO_TAXI"
 JOIN_KEYBOARD = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Kanalga qo‘shilish", url="https://t.me/WB_HUMO_TAXI")],
+    [InlineKeyboardButton("Kanalga obuna bo‘lish", url="https://t.me/WB_HUMO_TAXI")],
     [InlineKeyboardButton("✅ Tekshirish", callback_data="driver:check_membership")],
 ])
 
@@ -141,8 +141,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return JOIN_GROUP
         await update.effective_message.reply_text(
-            "📢 <b>Ariza yuborish uchun avval guruhimizga obuna bo‘ling.</b>\n\n"
-            "1️⃣ Pastdagi <b>“Guruhga qo‘shilish”</b> tugmasini bosing va guruhga a’zo bo‘ling.\n"
+            "📢 <b>Ariza yuborish uchun avval kanalimizga obuna bo‘ling.</b>\n\n"
+            "1️⃣ Pastdagi <b>“Kanalga obuna bo‘lish”</b> tugmasini bosing va kanalga obuna bo‘ling.\n"
             "2️⃣ So‘ng botga qaytib, <b>“✅ Tekshirish”</b> tugmasini bosing.\n\n"
             "Obuna tasdiqlangach, <b>ariza yuborishingiz mumkin bo‘ladi.</b> 🚕",
             parse_mode=ParseMode.HTML,

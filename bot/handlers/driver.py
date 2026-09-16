@@ -52,7 +52,7 @@ _pending_car_progress_tasks: dict[int, asyncio.Task] = {}
 JOIN_GROUP = 13
 REQUIRED_GROUP = "@WB_HUMO_TAXI"
 JOIN_KEYBOARD = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Guruhga qo‘shilish", url="https://t.me/WB_HUMO_TAXI")],
+    [InlineKeyboardButton("Kanalga qo‘shilish", url="https://t.me/WB_HUMO_TAXI")],
     [InlineKeyboardButton("✅ Tekshirish", callback_data="driver:check_membership")],
 ])
 

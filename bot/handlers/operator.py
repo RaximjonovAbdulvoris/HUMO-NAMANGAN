@@ -26,7 +26,7 @@ from bot.config import ARCHIVE_GROUP
 logger = logging.getLogger(__name__)
 
 READY_TEXT = (
-    "✅ <b>YANGI TAXI’ga arizangiz muvaffaqiyatli qabul qilindi!</b>\n\n"
+    "✅ <b>HUMO TAXI’ga arizangiz muvaffaqiyatli qabul qilindi!</b>\n\n"
     "📞 Tez orada operatorlarimiz siz bilan bog‘lanishadi.\n\n"
     "💬 Savollar uchun: <b>@humo_Namangan</b>"
 )

@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 READY_TEXT = (
     "✅ <b>YANGI TAXI’ga arizangiz muvaffaqiyatli qabul qilindi!</b>\n\n"
     "📞 Tez orada operatorlarimiz siz bilan bog‘lanishadi.\n\n"
-    "💬 Savollar uchun: <b>@humo_namangan</b>"
+    "💬 Savollar uchun: <b>@arizalarnamangan</b>"
 )
 
 
@@ -87,7 +87,23 @@ async def on_operator_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # 1. Retrieve stored message IDs for this application
         app_info = context.bot_data.get("app_messages", {}).get(applicant_id)
 
+        if not ARCHIVE_GROUP or not app_info:
+            await query.message.reply_text(
+                "⚠️ Arxivga yuborilmadi. "
+                + ("ARCHIVE_GROUP sozlanmagan." if not ARCHIVE_GROUP else
+                   "Bu arizaning saqlangan xabar ma’lumotlari topilmadi.")
+                + " Ariza o‘chirilmadi."
+            )
+            return
+        if (str(app_info["group_chat_id"]) != str(op_chat_id)
+                or app_info.get("kb_msg_id") != query.message.message_id):
+            await query.message.reply_text(
+                "⚠️ Bu tugma boshqa yoki eski arizaga tegishli. Ariza o‘chirilmadi."
+            )
+            return
+
         # 2. Copy to archive group
+        archive_failed = False
         if ARCHIVE_GROUP and app_info:
             src_chat = app_info["group_chat_id"]
             photo_ids = app_info.get("photo_msg_ids", [])
@@ -96,11 +112,14 @@ async def on_operator_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Try copy_messages (album grouping), fall back to one-by-one
             if photo_ids:
                 try:
-                    await context.bot.copy_messages(
+                    copied = await context.bot.copy_messages(
                         chat_id=ARCHIVE_GROUP,
                         from_chat_id=src_chat,
                         message_ids=photo_ids,
                     )
+                    if len(copied) != len(photo_ids):
+                        archive_failed = True
+                        logger.warning("archive: incomplete album copy")
                 except Exception as e:
                     logger.warning("archive: copy_messages failed (%s), trying one-by-one", e)
                     for mid in photo_ids:
@@ -111,6 +130,7 @@ async def on_operator_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                 message_id=mid,
                             )
                         except Exception as e2:
+                            archive_failed = True
                             logger.warning("archive: copy_message(%s) failed: %s", mid, e2)
 
             # Copy info message (inline keyboard stripped automatically)
@@ -122,7 +142,17 @@ async def on_operator_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         message_id=kb_msg_id,
                     )
                 except Exception as e:
+                    archive_failed = True
                     logger.warning("archive: could not copy info message: %s", e)
+
+        if archive_failed:
+            await query.message.reply_text(
+                "⚠️ Arxivga to‘liq yuborilmadi, asl ariza o‘chirilmadi. "
+                "Bot arxiv guruhiga qo‘shilganini, xabar va rasm yuborish "
+                "huquqini hamda ARCHIVE_GROUP to‘g‘riligini tekshiring. "
+                "So‘ng «Tayyor» tugmasini qayta bosing."
+            )
+            return
 
         # 3. Notify applicant
         try:

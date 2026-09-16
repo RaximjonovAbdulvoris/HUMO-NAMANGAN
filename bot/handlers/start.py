@@ -1,3 +1,4 @@
+from hashlib import sha256
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
@@ -64,8 +65,9 @@ def build_contact_handler() -> MessageHandler:
 
 
 async def show_office(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    photo_hash = sha256(OFFICE_PHOTO.read_bytes()).hexdigest()
     cached_photo = context.bot_data.get("office_photo_file_id")
-    if cached_photo:
+    if cached_photo and context.bot_data.get("office_photo_hash") == photo_hash:
         await update.message.reply_photo(
             photo=cached_photo, caption=OFFICE_CAPTION,
             parse_mode="HTML", reply_markup=OFFICE_KEYBOARD,
@@ -78,6 +80,7 @@ async def show_office(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         if sent.photo:
             context.bot_data["office_photo_file_id"] = sent.photo[-1].file_id
+            context.bot_data["office_photo_hash"] = photo_hash
 
 
 def build_office_handler() -> MessageHandler:

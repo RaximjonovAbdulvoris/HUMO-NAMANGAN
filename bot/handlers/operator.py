@@ -1,0 +1,361 @@
+"""Operator-side callbacks: Tayyor / Izoh berish buttons under each application.
+
+Two-way relay chat:
+  Operator -> "Izoh berish" -> user receives comment + "💬 Javob yozish" button
+  User presses button -> types reply -> forwarded back to operator group
+  Operator can reply again via "Izoh berish" — cycle continues.
+"""
+import asyncio
+import logging
+from html import escape as h
+
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from telegram.ext import (
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from bot.config import ARCHIVE_GROUP
+
+logger = logging.getLogger(__name__)
+
+READY_TEXT = (
+    "✅ <b>YANGI TAXI’ga arizangiz muvaffaqiyatli qabul qilindi!</b>\n\n"
+    "📞 Tez orada operatorlarimiz siz bilan bog‘lanishadi.\n\n"
+    "💬 Savollar uchun: <b>@arizalarnamangan</b>"
+)
+
+
+def build_operator_keyboard(applicant_user_id: int, in_progress: bool = False) -> InlineKeyboardMarkup:
+    progress_btn = InlineKeyboardButton(
+        "Jarayonda🟡" if in_progress else "Jarayonda🔴",
+        callback_data=f"op:progress:{applicant_user_id}",
+    )
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Tayyor", callback_data=f"op:ready:{applicant_user_id}"
+                ),
+                InlineKeyboardButton(
+                    "💬 Izoh berish", callback_data=f"op:comment:{applicant_user_id}"
+                ),
+            ],
+            [progress_btn],
+        ]
+    )
+
+
+def _reply_keyboard(group_chat_id: int) -> InlineKeyboardMarkup:
+    """Inline button shown to the user under the operator's comment."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("💬 Javob yozish", callback_data=f"user:reply:{group_chat_id}")]]
+    )
+
+
+# ------------------------------------------------------------------ #
+#  OPERATOR SIDE                                                       #
+# ------------------------------------------------------------------ #
+
+async def on_operator_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+
+    parts = query.data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "op":
+        return
+    action, applicant_id_str = parts[1], parts[2]
+    try:
+        applicant_id = int(applicant_id_str)
+    except ValueError:
+        return
+
+    operator = update.effective_user
+    op_name = operator.full_name if operator else "Operator"
+
+    if action == "ready":
+        op_chat_id = update.effective_chat.id if update.effective_chat else None
+
+        # 1. Retrieve stored message IDs for this application
+        app_info = context.bot_data.get("app_messages", {}).get(applicant_id)
+
+        # 2. Copy to archive group
+        if ARCHIVE_GROUP and app_info:
+            src_chat = app_info["group_chat_id"]
+            photo_ids = app_info.get("photo_msg_ids", [])
+            kb_msg_id = app_info.get("kb_msg_id")
+
+            # Try copy_messages (album grouping), fall back to one-by-one
+            if photo_ids:
+                try:
+                    await context.bot.copy_messages(
+                        chat_id=ARCHIVE_GROUP,
+                        from_chat_id=src_chat,
+                        message_ids=photo_ids,
+                    )
+                except Exception as e:
+                    logger.warning("archive: copy_messages failed (%s), trying one-by-one", e)
+                    for mid in photo_ids:
+                        try:
+                            await context.bot.copy_message(
+                                chat_id=ARCHIVE_GROUP,
+                                from_chat_id=src_chat,
+                                message_id=mid,
+                            )
+                        except Exception as e2:
+                            logger.warning("archive: copy_message(%s) failed: %s", mid, e2)
+
+            # Copy info message (inline keyboard stripped automatically)
+            if kb_msg_id:
+                try:
+                    await context.bot.copy_message(
+                        chat_id=ARCHIVE_GROUP,
+                        from_chat_id=src_chat,
+                        message_id=kb_msg_id,
+                    )
+                except Exception as e:
+                    logger.warning("archive: could not copy info message: %s", e)
+
+        # 3. Notify applicant
+        try:
+            await context.bot.send_message(
+                chat_id=applicant_id,
+                text=READY_TEXT,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning("ready: could not notify applicant %s: %s", applicant_id, e)
+
+        # 4. Delete PHOTO messages from operator group (kb_msg deleted in step 5)
+        if app_info:
+            src_chat = app_info["group_chat_id"]
+            for msg_id in app_info.get("photo_msg_ids", []):
+                try:
+                    await context.bot.delete_message(
+                        chat_id=src_chat, message_id=msg_id
+                    )
+                except Exception as e:
+                    logger.warning("ready: could not delete photo msg %s: %s", msg_id, e)
+            # Also delete kb_msg separately (in case step 5 can't reach it)
+            kb_id = app_info.get("kb_msg_id")
+            if kb_id:
+                try:
+                    await context.bot.delete_message(chat_id=src_chat, message_id=kb_id)
+                except Exception:
+                    pass  # step 5 will handle it via query.delete_message()
+            context.bot_data.get("app_messages", {}).pop(applicant_id, None)
+        context.bot_data.get("progress_state", {}).pop(applicant_id, None)
+
+        # 5. Delete the keyboard message that was clicked (fallback if step 4 missed it)
+        try:
+            await query.delete_message()
+        except Exception:
+            try:
+                await query.edit_message_text(
+                    f"✅ Tayyor — ariza arxivlandi.\n👤 Operator: {op_name}",
+                )
+            except Exception:
+                pass
+
+    elif action == "progress":
+        # Toggle: 🔴 → 🟡 (once pressed, stays 🟡)
+        progress_state = context.bot_data.setdefault("progress_state", {})
+        already = progress_state.get(applicant_id, False)
+        if already:
+            await query.answer("Jarayon allaqachon boshlangan 🟡", show_alert=False)
+            return
+        progress_state[applicant_id] = True
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=build_operator_keyboard(applicant_id, in_progress=True)
+            )
+        except Exception:
+            logger.warning("progress: could not update keyboard for %s", applicant_id)
+
+    elif action == "comment":
+        pending = context.bot_data.setdefault("pending_comments", {})
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        op_id = operator.id if operator else None
+        if chat_id is None or op_id is None:
+            return
+        pending[(chat_id, op_id)] = applicant_id
+
+        info = context.bot_data.get("applicant_info", {}).get(applicant_id, {})
+        ap_name = h(info.get("name") or "Arizachi")
+        ap_username = info.get("username") or ""
+        if ap_username:
+            applicant_link = f'<a href="https://t.me/{ap_username}">{ap_name} (@{ap_username})</a>'
+        else:
+            applicant_link = f'<a href="tg://user?id={applicant_id}">{ap_name}</a>'
+
+        prompt = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"💬 <b>Izoh kiriting</b> → {applicant_link}\n"
+                f"👤 Operator: {op_name}\n\n"
+                f"Bekor qilish uchun: /bekor"
+            ),
+            parse_mode="HTML",
+            reply_to_message_id=query.message.message_id if query.message else None,
+        )
+        pending_msgs = context.bot_data.setdefault("pending_prompts", {})
+        pending_msgs[(chat_id, op_id)] = prompt.message_id
+
+
+async def on_operator_text_in_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catch operator text in a group when a comment is pending."""
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    chat = update.effective_chat
+    operator = update.effective_user
+    if not chat or not operator:
+        return
+
+    pending = context.bot_data.get("pending_comments", {})
+    key = (chat.id, operator.id)
+    applicant_id = pending.get(key)
+    if applicant_id is None:
+        return
+
+    text = msg.text.strip()
+
+    if text.lower() in ("/bekor", "bekor"):
+        pending.pop(key, None)
+        await msg.reply_text("❌ Izoh bekor qilindi.")
+        return
+
+    op_name = operator.full_name or "Operator"
+    try:
+        await context.bot.send_message(
+            chat_id=applicant_id,
+            text=f"💬 <b>WB TAXI LEGENDA — Operator izohi:</b>\n\n{h(text)}",
+            parse_mode="HTML",
+            reply_markup=_reply_keyboard(chat.id),
+        )
+        await msg.reply_text(
+            f"✅ Izoh arizachiga yuborildi.\n👤 Operator: {op_name}"
+        )
+    except Exception as e:
+        logger.exception("comment: failed to send to %s", applicant_id)
+        await msg.reply_text(
+            f"⚠️ Izoh yuborilmadi: {e}\n"
+            f"Sabab: foydalanuvchi botni bloklagan yoki /start bosmagan."
+        )
+    finally:
+        pending.pop(key, None)
+
+
+# ------------------------------------------------------------------ #
+#  USER SIDE  (reply to operator comment)                              #
+# ------------------------------------------------------------------ #
+
+async def on_user_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User pressed '💬 Javob yozish' under an operator comment."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+
+    parts = query.data.split(":", 2)
+    if len(parts) != 3 or parts[0] != "user" or parts[1] != "reply":
+        return
+    try:
+        group_chat_id = int(parts[2])
+    except ValueError:
+        return
+
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id is None:
+        return
+
+    context.bot_data.setdefault("pending_user_replies", {})[user_id] = group_chat_id
+
+    await query.message.reply_text(
+        "✏️ Javobingizni yozing:\n\nBekor qilish uchun: /bekor",
+    )
+
+
+async def on_user_reply_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forward the user's reply to the operator group."""
+    msg = update.message
+    if not msg:
+        return
+    user = update.effective_user
+    if not user:
+        return
+
+    pending = context.bot_data.get("pending_user_replies", {})
+    group_chat_id = pending.get(user.id)
+    if group_chat_id is None:
+        return
+
+    text = (msg.text or "").strip()
+    if not text:
+        await msg.reply_text("❗ Iltimos, matn yozing.")
+        return
+
+    if text.lower() in ("/bekor", "bekor"):
+        pending.pop(user.id, None)
+        await msg.reply_text("❌ Javob bekor qilindi.")
+        return
+
+    user_link = (
+        f'<a href="https://t.me/{user.username}">{h(user.full_name)}</a>'
+        if user.username
+        else f'<a href="tg://user?id={user.id}">{h(user.full_name or "Foydalanuvchi")}</a>'
+    )
+
+    context.bot_data.setdefault("applicant_info", {})[user.id] = {
+        "name": user.full_name or "Arizachi",
+        "username": user.username or "",
+    }
+
+    try:
+        await context.bot.send_message(
+            chat_id=group_chat_id,
+            text=(
+                f"📩 <b>Arizachi javobi:</b>\n"
+                f"👤 {user_link}\n\n"
+                f"{h(text)}"
+            ),
+            parse_mode="HTML",
+            reply_markup=build_operator_keyboard(user.id),
+        )
+        await msg.reply_text("✅ Javobingiz operatorlarga yuborildi.")
+    except Exception as e:
+        logger.exception("user_reply: failed to send to group %s", group_chat_id)
+        await msg.reply_text(f"⚠️ Javob yuborilmadi: {e}")
+    finally:
+        pending.pop(user.id, None)
+
+
+# ------------------------------------------------------------------ #
+#  REGISTRATION                                                        #
+# ------------------------------------------------------------------ #
+
+def register_operator_handlers(app):
+    app.add_handler(CallbackQueryHandler(on_operator_button, pattern=r"^op:"))
+    app.add_handler(CallbackQueryHandler(on_user_reply_button, pattern=r"^user:reply:"))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+            on_operator_text_in_group,
+        ),
+        group=1,
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            on_user_reply_message,
+        ),
+        group=2,
+    )

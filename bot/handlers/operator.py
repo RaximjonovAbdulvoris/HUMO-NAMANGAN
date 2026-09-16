@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 READY_TEXT = (
     "✅ <b>YANGI TAXI’ga arizangiz muvaffaqiyatli qabul qilindi!</b>\n\n"
     "📞 Tez orada operatorlarimiz siz bilan bog‘lanishadi.\n\n"
-    "💬 Savollar uchun: <b>@arizalarnamangan</b>"
+    "💬 Savollar uchun: <b>@humo_namangan</b>"
 )
 
 

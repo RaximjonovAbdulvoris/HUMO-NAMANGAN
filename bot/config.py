@@ -7,8 +7,6 @@ CHANNEL = os.environ.get("CHANNEL", "@WB_HUMO_TAXI")
 DRIVER_GROUPS = [
     os.environ["DRIVER_GROUP_1"],
     os.environ["DRIVER_GROUP_2"],
-    os.environ["DRIVER_GROUP_3"],
-    os.environ["DRIVER_GROUP_4"],
 ]
 
 BRAND_GROUP = os.environ["BRAND_GROUP"]

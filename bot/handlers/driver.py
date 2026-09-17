@@ -3,8 +3,6 @@ import logging
 from html import escape as h
 
 from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     InputMediaPhoto,
     KeyboardButton,
     ReplyKeyboardMarkup,
@@ -12,7 +10,6 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -22,10 +19,17 @@ from telegram.ext import (
     filters,
 )
 
-from bot.config import DRIVER_GROUPS, template_path
+from bot.config import template_path
 from bot.counter import next_index
-from bot.handlers.operator import build_operator_keyboard
-from bot.handlers.start import MAIN_KEYBOARD, MENU_DRIVER, cancel
+from bot.handlers.operator import build_operator_keyboard, register_application
+from bot.handlers.start import MENU_DRIVER, main_keyboard, require_region, cancel
+from bot.regions import (
+    clear_application,
+    driver_groups,
+    get_region,
+    region_name,
+)
+from bot.subscription import require_subscription, subscription_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +55,34 @@ _pending_car_progress_tasks: dict[int, asyncio.Task] = {}
 
 JOIN_GROUP = 13
 REQUIRED_GROUP = "@WB_HUMO_TAXI"
-JOIN_KEYBOARD = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Kanalga obuna bo‘lish", url="https://t.me/WB_HUMO_TAXI")],
-    [InlineKeyboardButton("✅ Tekshirish", callback_data="driver:check_membership")],
-])
+JOIN_KEYBOARD = subscription_keyboard("driver:check_membership")
 
 CONTINUE_BTN = "✅ Davom etish"
 CONTINUE_KB = ReplyKeyboardMarkup(
     [[CONTINUE_BTN]], resize_keyboard=True, one_time_keyboard=True
 )
+
+
+def _regional_keyboard(context):
+    return main_keyboard(get_region(context))
+
+
+def _region_required(context) -> str:
+    region = get_region(context)
+    if not region:
+        raise RuntimeError("Tasdiqlangan hudud topilmadi")
+    return region
+
+
+async def _require_region(update, context) -> bool:
+    return await require_region(update, context)
+
+
+async def _destination_error(update, context, text: str) -> None:
+    await update.effective_message.reply_text(
+        f"⚠️ {text}\nIltimos, keyinroq qayta urinib ko‘ring.",
+        reply_markup=_regional_keyboard(context),
+    )
 
 
 # -------------------- prompt sender --------------------
@@ -108,57 +131,48 @@ async def _send_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 # -------------------- entry --------------------
 async def start_driver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await _require_region(update, context):
+        return ConversationHandler.END
+    region = get_region(context)
+    # A new form always starts with only the selected branch retained.
+    clear_application(context)
+    context.user_data["_application_kind"] = "driver"
+    if not driver_groups(region):
+        await _destination_error(
+            update, context,
+            f"{region_name(region)} uchun haydovchilar guruhi sozlanmagan.",
+        )
+        clear_application(context)
+        return ConversationHandler.END
     return await check_membership(update, context)
 
 
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-
-    try:
-        member = await context.bot.get_chat_member(
-            chat_id=REQUIRED_GROUP, user_id=update.effective_user.id,
+    # Membership may be checked long after the menu was opened.  Revalidate
+    # the branch and destination before accepting the first form answer.
+    if not await _require_region(update, context):
+        return ConversationHandler.END
+    region = _region_required(context)
+    if not driver_groups(region):
+        if update.callback_query:
+            await update.callback_query.answer()
+        await _destination_error(
+            update, context,
+            f"{region_name(region)} uchun haydovchilar guruhi sozlanmagan.",
         )
-        joined = member.status in ("creator", "administrator", "member") or (
-            member.status == "restricted" and member.is_member
-        )
-    except TelegramError:
-        logger.warning("Required group membership check failed")
-        if query:
-            await query.answer()
-        await update.effective_message.reply_text(
-            "A’zolikni hozir tekshirib bo‘lmadi. Iltimos, birozdan keyin "
-            "«✅ Tekshirish» tugmasini qayta bosing. "
-            "Muammo davom etsa, @arizalarnamangan orqali bog‘laning.",
-            reply_markup=JOIN_KEYBOARD,
-        )
+        clear_application(context)
+        return ConversationHandler.END
+    if not await require_subscription(
+        update, context, callback_data="driver:check_membership"
+    ):
         return JOIN_GROUP
 
-    if not joined:
-        if query:
-            await query.answer(
-                "Iltimos, obuna bo‘lgandan so‘ng ariza tashlashingiz mumkin.",
-                show_alert=True,
-            )
-            return JOIN_GROUP
-        await update.effective_message.reply_text(
-            "📢 <b>Ariza yuborish uchun avval kanalimizga obuna bo‘ling.</b>\n\n"
-            "1️⃣ Pastdagi <b>“Kanalga obuna bo‘lish”</b> tugmasini bosing va kanalga obuna bo‘ling.\n"
-            "2️⃣ So‘ng botga qaytib, <b>“✅ Tekshirish”</b> tugmasini bosing.\n\n"
-            "Obuna tasdiqlangach, <b>ariza yuborishingiz mumkin bo‘ladi.</b> 🚕",
-            parse_mode=ParseMode.HTML,
-            reply_markup=JOIN_KEYBOARD,
-        )
-        return JOIN_GROUP
-
-    if query:
-        await query.answer()
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except TelegramError:
-            logger.warning("Could not remove membership check keyboard")
-    context.user_data.clear()
+    # Keep the confirmed region while discarding any stale form data.
+    clear_application(context)
+    context.user_data["_application_kind"] = "driver"
+    context.user_data["_application_region"] = region
     await update.effective_message.reply_text(
-        "📝 *Haydovchilik uchun ariza*\n\n"
+        f"📝 *{region_name(region)} — haydovchilik arizasi*\n\n"
         "Iltimos, *ism va familiyangizni* yozing:",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
@@ -485,6 +499,17 @@ async def get_car_plate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             parse_mode="Markdown",
         )
         return CAR_PLATE
+    if not await _require_region(update, context):
+        return ConversationHandler.END
+    region = _region_required(context)
+    if context.user_data.get("_application_region") != region:
+        clear_application(context)
+        await update.message.reply_text(
+            "⚠️ Hudud almashtirilgani uchun eski ariza bekor qilindi. "
+            "Yangi hudud uchun arizani qayta boshlang.",
+            reply_markup=_regional_keyboard(context),
+        )
+        return ConversationHandler.END
     context.user_data["car_plate"] = plate
 
     user = update.effective_user
@@ -496,20 +521,22 @@ async def get_car_plate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await _send_to_driver_group(context)
     except Exception as e:
         logger.exception("driver: send_to_driver_group failed: %s", e)
+        clear_application(context)
         await update.message.reply_text(
-            "⚠️ Texnik xatolik yuz berdi. Iltimos, qaytadan /start bosib urinib ko'ring."
+            "⚠️ Arizani yuborish vaqtida texnik xatolik yuz berdi. "
+            "Iltimos, birozdan keyin qayta urinib ko‘ring.",
+            reply_markup=_regional_keyboard(context),
         )
-        context.user_data.clear()
         return ConversationHandler.END
 
     await update.message.reply_text(
         "🎉 *Tabriklaymiz!*\n\n"
-        "Arizangiz qabul qilindi. Tez orada operatorlarimiz "
-        "tomonidan ko'rib chiqilib, qayta javob yozib yuboriladi.",
+        f"{region_name(_region_required(context))} haydovchilik arizangiz qabul qilindi. "
+        "Tez orada operatorlarimiz siz bilan bog‘lanadi.",
         parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=_regional_keyboard(context),
     )
-    context.user_data.clear()
+    clear_application(context)
     return ConversationHandler.END
 
 
@@ -525,8 +552,17 @@ async def car_plate_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _send_to_driver_group(context: ContextTypes.DEFAULT_TYPE):
     """Send the application to ONE driver group, rotating through them."""
     d = context.user_data
-    idx = next_index("driver_group_rr", len(DRIVER_GROUPS))
-    chat_id = DRIVER_GROUPS[idx]
+    region = _region_required(context)
+    flow_region = d.get("_application_region")
+    if flow_region != region:
+        raise RuntimeError("Application region changed while form was in progress")
+    groups = driver_groups(region)
+    # Recheck immediately before sending: configuration can change while a
+    # user is completing the form, and never fall back to another region.
+    if not groups:
+        raise RuntimeError(f"{region_name(region)} driver destination is missing")
+    idx = next_index(f"driver_group_rr:{region}", len(groups))
+    chat_id = groups[idx]
 
     user_id = d.get("user_id")
     username = d.get("user_username", "")
@@ -537,7 +573,7 @@ async def _send_to_driver_group(context: ContextTypes.DEFAULT_TYPE):
     )
 
     caption_main = (
-        "📝 <b>YANGI ARIZA</b>\n\n"
+        f"📝 <b>{h(region_name(region))} — YANGI ARIZA</b>\n\n"
         f"👤 Foydalanuvchi: {user_link_html}\n"
         f"🪪 Ism familiya: {h(d.get('name', '-'))}\n"
         f"📞 Tel: {h(d.get('phone', '-'))}\n"
@@ -607,12 +643,17 @@ async def _send_to_driver_group(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_operator_keyboard(user_id),
         )
 
-        # Store separately: photos (to copy as albums) + keyboard msg ID (to delete)
-        context.bot_data.setdefault("app_messages", {})[user_id] = {
-            "group_chat_id": chat_id,
-            "photo_msg_ids": photo_msg_ids,
-            "kb_msg_id": kb_msg.message_id,
-        }
+        register_application(
+            context,
+            applicant_id=user_id,
+            region=region,
+            kind="driver",
+            group_chat_id=chat_id,
+            photo_msg_ids=photo_msg_ids,
+            kb_msg_id=kb_msg.message_id,
+            applicant_name=d.get("name") or full_name or "Arizachi",
+            username=username,
+        )
 
     logger.info("[driver] sent application to group #%s (%s)", idx + 1, chat_id)
 
@@ -629,7 +670,10 @@ def _photo_state(get_handler, wrong_handler):
 def build_driver_conversation() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(f"^{MENU_DRIVER}$"), start_driver),
+            MessageHandler(
+                filters.ChatType.PRIVATE & filters.Regex(f"^{MENU_DRIVER}$"),
+                start_driver,
+            ),
         ],
         states={
             JOIN_GROUP: [

@@ -2,14 +2,21 @@ import logging
 
 from telegram import Update
 from telegram.error import Conflict, NetworkError, TimedOut
-from telegram.ext import Application, CommandHandler, ContextTypes, PicklePersistence
+from telegram.ext import (
+    Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler,
+    ContextTypes, ConversationHandler, MessageHandler, PicklePersistence, filters,
+)
 from telegram.request import HTTPXRequest
 
 from bot.config import BOT_TOKEN
 from bot.handlers.brand import build_brand_conversation
 from bot.handlers.driver import build_driver_conversation
-from bot.handlers.operator import register_operator_handlers
-from bot.handlers.start import build_contact_handler, build_office_handler, start
+from bot.handlers.operator import on_user_reply_message, register_operator_handlers
+from bot.handlers.start import (
+    MENU_BRAND, MENU_CONTACT, MENU_DRIVER, MENU_OFFICE, MENU_REGION, MENU_SPECTRE,
+    build_contact_handler, build_office_handler, build_region_handler, cancel,
+    show_menu, start,
+)
 from bot.warmup import warmup_templates
 
 logging.basicConfig(
@@ -18,6 +25,65 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+MENU_ACTIONS = {MENU_DRIVER, MENU_BRAND, MENU_CONTACT, MENU_OFFICE, MENU_SPECTRE, MENU_REGION}
+
+
+async def intercept_pending_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A reply to an operator must not also become an application field."""
+    if not update.effective_user or not update.message:
+        return
+    pending = context.bot_data.get("pending_user_replies", {})
+    user_id = update.effective_user.id
+    if user_id not in pending:
+        return
+    text = update.message.text or ""
+    command = text.split(maxsplit=1)[0].split("@")[0] if text else ""
+    if text in MENU_ACTIONS or command in ("/start", "/cancel"):
+        pending.pop(user_id, None)
+        return
+    await on_user_reply_message(update, context)
+    raise ApplicationHandlerStop
+
+
+def build_application_conversation() -> ConversationHandler:
+    """One state machine prevents driver and brand forms running concurrently."""
+    driver = build_driver_conversation()
+    brand = build_brand_conversation()
+    if set(driver.states) & set(brand.states):
+        raise ValueError("Driver and brand conversation states must not overlap")
+    navigation = [
+        CommandHandler("start", start, filters.ChatType.PRIVATE),
+        CommandHandler("cancel", cancel, filters.ChatType.PRIVATE),
+        MessageHandler(filters.ChatType.PRIVATE & filters.Regex(f"^{MENU_REGION}$"), start),
+        build_contact_handler(),
+        build_office_handler(),
+    ]
+    return ConversationHandler(
+        entry_points=navigation + driver.entry_points + brand.entry_points,
+        states={**driver.states, **brand.states},
+        fallbacks=navigation,
+        allow_reentry=True,
+    )
+
+
+async def stale_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer(
+        "Bu tugma eskirgan. Menyudan ariza turini qayta tanlang.", show_alert=True,
+    )
+
+
+def register_handlers(app) -> None:
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE, intercept_pending_reply), group=-1)
+    app.add_handler(build_region_handler())
+    app.add_handler(build_application_conversation())
+    register_operator_handlers(app)
+    app.add_handler(CallbackQueryHandler(
+        stale_subscription, pattern=r"^(?:driver|brand|spectre):check_membership$",
+    ))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, show_menu,
+    ))
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -84,12 +150,7 @@ def main() -> None:
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(build_contact_handler())
-    app.add_handler(build_office_handler())
-    app.add_handler(build_driver_conversation())
-    app.add_handler(build_brand_conversation())
-    register_operator_handlers(app)
+    register_handlers(app)
     app.add_error_handler(on_error)
 
     logger.info("🚖 WB TAXI HUMO bot ishga tushdi...")
